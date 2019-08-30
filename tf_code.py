@@ -1,5 +1,7 @@
 import numpy as np
 import tensorflow as tf
+import torch
+import torch.nn.functional as F
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import sparse_tensor
 from tensorflow.python.ops.ragged import ragged_tensor
@@ -9,66 +11,414 @@ from tqdm import trange
 
 tf.compat.v1.enable_eager_execution()
 
+from cuda_implementation import relative_positioning_2d, relative_positioning_3d
 
-class TestClass:
-    @staticmethod
-    def python_relative_att(q, k, batch, num_heads, height, width,
-                            height_key_relative_embeddings,
-                            width_key_relative_embeddings,
-                            heads_share_relative_embedding):
-        """Relative attention computation in numpy.
-        For query index (i,j) and key index (l, m) the logit is
-        q_i k_j^T + q_i rh_{l-i}^T + q_i rw_{m-j}^T, where rh and ry are the set of
-        relative embeddings in height and width spatial dimensions, respectively.
+
+def python_relative_att(q, k, batch, num_heads, height, width,
+                        height_key_relative_embeddings,
+                        width_key_relative_embeddings,
+                        heads_share_relative_embedding):
+    """Relative attention computation in numpy.
+    For query index (i,j) and key index (l, m) the logit is
+    q_i k_j^T + q_i rh_{l-i}^T + q_i rw_{m-j}^T, where rh and ry are the set of
+    relative embeddings in height and width spatial dimensions, respectively.
+    Args:
+      q: [batch, heads, height, width, depth] tensor
+      k: [batch, heads, height, width, depth] tensor
+      v: [batch, heads, height, width, depth] tensor
+      batch: int scalar
+      num_heads: int scalar
+      height: int scalar
+      width: int scalar
+      depth: int scalar
+      height_key_relative_embeddings: a tensor of relative embeddings
+      width_key_relative_embeddings: a tensor of relative embeddings
+      heads_share_relative_embedding: a boolean
+    Returns:
+      att_output: A tensor
+    """
+
+    logits = np.zeros((batch, num_heads, height * width, height * width))
+    for b in range(batch):
+        for h in range(num_heads):
+            for i in range(height * width):
+                q_col = i % width
+                q_row = i // width
+                for j in range(height * width):
+                    k_col = j % width
+                    k_row = j // width
+                    logit = np.dot(q[b][h][q_row][q_col], k[b][h][k_row][k_col])
+                    width_rel_dist = k_col - q_col
+                    width_rel_index = width - 1 + width_rel_dist
+                    if heads_share_relative_embedding:
+                        width_rel_logit = (
+                            np.dot(q[b][h][q_row][q_col],
+                                   width_key_relative_embeddings[width_rel_index]))
+                    else:
+                        width_rel_logit = (
+                            np.dot(q[b][h][q_row][q_col],
+                                   width_key_relative_embeddings[h][width_rel_index]))
+                    height_rel_dist = k_row - q_row
+                    height_rel_index = height - 1 + height_rel_dist
+                    if heads_share_relative_embedding:
+                        height_rel_logit = (
+                            np.dot(q[b][h][q_row][q_col],
+                                   height_key_relative_embeddings[height_rel_index]))
+                    else:
+                        height_rel_logit = (
+                            np.dot(q[b][h][q_row][q_col],
+                                   height_key_relative_embeddings[h][height_rel_index]))
+                    logits[b, h, i, j] = logit + width_rel_logit + height_rel_logit
+    return np.reshape(logits, (batch, num_heads, height, width, height, width))
+
+
+def python_relative_att_3d(q, k, batch, num_heads, time, height, width,
+                           time_key_relative_embeddings,
+                           height_key_relative_embeddings,
+                           width_key_relative_embeddings,
+                           heads_share_relative_embedding):
+    """Relative attention computation in numpy.
+    Args:
+      q: [batch, heads, time, height, width, depth] tensor
+      k: [batch, heads, time, height, width, depth] tensor
+      height_key_relative_embeddings: a tensor of relative embeddings
+      width_key_relative_embeddings: a tensor of relative embeddings
+    """
+
+    logits = np.zeros((batch * num_heads, time * height * width, time * height * width))
+    for b in range(batch):
+        for h in range(num_heads):
+            for i in range(time * height * width):
+                q_t = i // (height * width)
+                q_h = (i % (height * width)) // width
+                q_w = i % width
+                for j in range(time * height * width):
+                    k_t = j // (height * width)
+                    k_h = (j % (height * width)) // width
+                    k_w = j % width
+                    logit = np.dot(q[b][h][q_t][q_h][q_w], k[b][h][k_t][k_h][k_w])
+
+                    width_rel_dist = k_w - q_w
+                    width_rel_index = width - 1 + width_rel_dist
+                    if heads_share_relative_embedding:
+                        width_rel_logit = (
+                            np.dot(q[b][h][q_t][q_h][q_w],
+                                   width_key_relative_embeddings[width_rel_index]))
+                    else:
+                        width_rel_logit = (
+                            np.dot(q[b][h][q_t][q_h][q_w],
+                                   width_key_relative_embeddings[h][width_rel_index]))
+
+                    height_rel_dist = k_h - q_h
+                    height_rel_index = height - 1 + height_rel_dist
+                    if heads_share_relative_embedding:
+                        height_rel_logit = (
+                            np.dot(q[b][h][q_t][q_h][q_w],
+                                   height_key_relative_embeddings[height_rel_index]))
+                    else:
+                        height_rel_logit = (
+                            np.dot(q[b][h][q_t][q_h][q_w],
+                                   height_key_relative_embeddings[h][height_rel_index]))
+
+                    time_rel_dist = k_t - q_t
+                    time_rel_index = time - 1 + time_rel_dist
+                    if heads_share_relative_embedding:
+                        time_rel_logit = (
+                            np.dot(q[b][h][q_t][q_h][q_w],
+                                   time_key_relative_embeddings[time_rel_index]))
+                    else:
+                        time_rel_logit = (
+                            np.dot(q[b][h][q_t][q_h][q_w],
+                                   time_key_relative_embeddings[h][time_rel_index]))
+
+                    logits[b * num_heads + h, i, j] = logit + width_rel_logit + height_rel_logit + time_rel_logit
+    return np.reshape(logits, (batch * num_heads, time * height * width, time * height * width))
+
+
+class PytorchTest:
+    def _matmul_with_relative_keys_2d(self, x, y, heads_share_relative_embedding):
+        """Helper function for dot_product_unmasked_self_attention_relative_2d."""
+        if heads_share_relative_embedding:
+            ret = torch.einsum("bhxyd,md->bhxym", x, y)
+        else:
+            ret = torch.einsum("bhxyd,hmd->bhxym", x, y)
+        return ret
+
+    def _matmul_with_relative_keys_3d(self, x, y, heads_share_relative_embedding):
+        """Helper function for dot_product_unmasked_self_attention_relative_3d."""
+        if heads_share_relative_embedding:
+            ret = torch.einsum("bhxyzd,md->bhxyzm", x, y)
+        else:
+            ret = torch.einsum("bhxyzd,hmd->bhxyzm", x, y)
+        return ret
+
+    def _relative_position_to_absolute_position_unmasked(self, x):
+        """Converts tensor from relative to aboslute indexing for local attention.
         Args:
-          q: [batch, heads, height, width, depth] tensor
-          k: [batch, heads, height, width, depth] tensor
-          v: [batch, heads, height, width, depth] tensor
-          batch: int scalar
-          num_heads: int scalar
-          height: int scalar
-          width: int scalar
-          depth: int scalar
-          height_key_relative_embeddings: a tensor of relative embeddings
-          width_key_relative_embeddings: a tensor of relative embeddings
-          heads_share_relative_embedding: a boolean
+          x: a Tensor of shape [batch (or batch*num_blocks), heads,
+                                length, 2 * length - 1]
         Returns:
-          att_output: A tensor
+          A Tensor of shape [batch (or batch*num_blocks), heads, length, length]
         """
+        x_shape = x.size()
+        batch = x_shape[0]
+        heads = x_shape[1]
+        length = x_shape[2]
+        # Concat columns of pad to shift from relative to absolute indexing.
+        col_pad = torch.zeros((batch, heads, length, 1)).to(x)
+        x = torch.cat([x, col_pad], dim=3)
 
-        logits = np.zeros((batch, num_heads, height * width, height * width))
-        for b in range(batch):
-            for h in range(num_heads):
-                for i in range(height * width):
-                    q_col = i % width
-                    q_row = i // width
-                    for j in range(height * width):
-                        k_col = j % width
-                        k_row = j // width
-                        logit = np.dot(q[b][h][q_row][q_col], k[b][h][k_row][k_col])
-                        width_rel_dist = k_col - q_col
-                        width_rel_index = width - 1 + width_rel_dist
-                        if heads_share_relative_embedding:
-                            width_rel_logit = (
-                                np.dot(q[b][h][q_row][q_col],
-                                       width_key_relative_embeddings[width_rel_index]))
-                        else:
-                            width_rel_logit = (
-                                np.dot(q[b][h][q_row][q_col],
-                                       width_key_relative_embeddings[h][width_rel_index]))
-                        height_rel_dist = k_row - q_row
-                        height_rel_index = height - 1 + height_rel_dist
-                        if heads_share_relative_embedding:
-                            height_rel_logit = (
-                                np.dot(q[b][h][q_row][q_col],
-                                       height_key_relative_embeddings[height_rel_index]))
-                        else:
-                            height_rel_logit = (
-                                np.dot(q[b][h][q_row][q_col],
-                                       height_key_relative_embeddings[h][height_rel_index]))
-                        logits[b, h, i, j] = logit + width_rel_logit + height_rel_logit
-        return np.reshape(logits, (batch, num_heads, height, width, height, width))
+        # Concat extra elements so to add up to shape (len+1, 2*len-1).
+        flat_x = x.reshape(batch, heads, length * 2 * length)
+        flat_pad = torch.zeros((batch, heads, length - 1)).to(x)
+        flat_x_padded = torch.cat([flat_x, flat_pad], dim=2)
 
+        # Reshape and slice out the padded elements.
+        final_x = flat_x_padded.reshape(batch, heads, length + 1, 2 * length - 1)
+        final_x = final_x[:, :, :, length - 1:]
+        final_x = final_x[:, :, :length, :]
+        return final_x
+
+    def dot_product_unmasked_self_attention_relative_2d(self, q, k, bias,
+                                                        max_relative_position=None,
+                                                        heads_share_relative_embedding=False):
+        """Calculate relative position unmasked dot-product self-attention 2d.
+        The attention calculation is augmented with learned representations for the
+        relative position between each element in q and each element in k and v in
+        height and width dimensions. for query index (i,j) and key index (l, m),
+        the logit is q_i k_j^T + q_i rh_{l-i}^T + q_i rw_{m-j}^T, where rh and ry are
+        the set of relative embeddings in height and width spatial dimensions,
+        respectively.
+        Args:
+          q: a Tensor with shape [batch, heads, height, width, depth].
+          k: a Tensor with shape [batch, heads, height, width, depth].
+          bias: bias Tensor.
+          max_relative_position: an integer the max relative embedding considered.
+            Changing this invalidates checkpoints.
+          dropout_rate: a floating point number.
+          image_shapes: optional tuple of integer scalars.
+          name: an optional string.
+          make_image_summary: Whether to make an attention image summary.
+          dropout_broadcast_dims:  an optional list of integers less than 4
+            specifying in which dimensions to broadcast the dropout decisions.
+            saves memory.
+          heads_share_relative_embedding: a boolean indicating wheather to share
+            relative embeddings between attention heads.
+          add_relative_to_values: a boolean for adding relative embeddings to values.
+        Returns:
+          [batch, heads, height, width, depth] tensor, the output of attention.
+          height_key_relative_embeddings: a 3d or 2d tensor, depending on head sharing
+            settings, which are the relative embeddings for height.
+          width_key_relative_embeddings: a 3d or 2d tensor, depending on head sharing
+            settings, which are the relative embeddings for width.
+        Raises:
+          ValueError: if max_relative_position is not > 0.
+        """
+        if not max_relative_position:
+            raise ValueError("Max relative position (%s) should be > 0 when using "
+                             "relative self attention." % (max_relative_position))
+
+        (height, width) = q.size(2), q.size(3)
+        k_shape = k.size()
+        num_heads = k_shape[1]
+        depth_k = k_shape[-1]
+        # [batch, num_heads, query_length, memory_length]
+        logits = torch.einsum('bnhwd, bnxyd -> bnhwxy', q, k).reshape(-1, num_heads, height * width, height * width)
+
+        def _compute_2d_relative_logits(
+                query, key_relative_embeddings, height, width,
+                heads_share_relative_embedding, transpose_mask):
+            """compute relative logits."""
+            unmasked_rel_logits = self._matmul_with_relative_keys_2d(
+                query, key_relative_embeddings, heads_share_relative_embedding)
+            # collapse height and heads
+            unmasked_rel_logits = unmasked_rel_logits.reshape(-1, num_heads * height, width, 2 * width - 1)
+            unmasked_rel_logits = self._relative_position_to_absolute_position_unmasked(unmasked_rel_logits)
+            # shape it back for tiling
+            unmasked_rel_logits = unmasked_rel_logits.reshape(-1, num_heads, height, width, width)
+            # tiling it height times
+            unmasked_rel_logits = unmasked_rel_logits.unsqueeze(3)
+            unmasked_rel_logits = unmasked_rel_logits.expand(-1, -1, -1, height, -1, -1)
+            # bringing it to the right shape for adding to the logits.
+            unmasked_rel_logits = unmasked_rel_logits.permute(transpose_mask)
+            unmasked_rel_logits = unmasked_rel_logits.reshape(-1, num_heads, height * width, height * width)
+            return unmasked_rel_logits
+
+        # Relative logits in width dimension first.
+        width_key_relative_embeddings = self.get_relative_embeddings_left_right(
+            max_relative_position, width, depth_k, num_heads,
+            heads_share_relative_embedding)  # => [nH or None, 2*width - 1, depth_k]
+        # [batch, heads, height, 2*width-1, 2*width-1]
+        width_unmasked_rel_logits = _compute_2d_relative_logits(
+            q, width_key_relative_embeddings, height, width,
+            heads_share_relative_embedding, [0, 1, 2, 4, 3, 5])
+        logits += width_unmasked_rel_logits
+        # Relative logits in height dimension next. For ease, we transpose
+        # height and width and repeat the above steps, and transpose to eventually
+        # put the logits in their right positions.
+        # [batch, heads, height, 2*height-1, 2*width-1]
+        height_key_relative_embeddings = self.get_relative_embeddings_left_right(
+            max_relative_position, height, depth_k, num_heads,
+            heads_share_relative_embedding)
+
+        height_unmasked_rel_logits = _compute_2d_relative_logits(
+            q.permute(0, 1, 3, 2, 4),
+            height_key_relative_embeddings,
+            width,
+            height,
+            heads_share_relative_embedding, [0, 1, 4, 2, 5, 3])
+        logits += height_unmasked_rel_logits
+        if bias is not None:
+            logits += bias
+        # reshape back the same spatial dimensions as q
+        return (
+            logits.reshape(-1, num_heads, height, width, height, width),
+            height_key_relative_embeddings,
+            width_key_relative_embeddings)
+
+    def dot_product_unmasked_self_attention_relative_3d(self, q, k, time_key_relative_embeddings,
+                                                        height_key_relative_embeddings, width_key_relative_embeddings):
+        batch, num_heads, time, height, width, depth_k = q.size()
+        logits = torch.einsum('bnthwd, bnxyzd -> bnthwxyz', q, k).reshape(-1, num_heads, time * height * width,
+                                                                          time * height * width)
+
+        def _compute_3d_relative_logits(unmasked_rel_logits, transpose_mask):
+            # unmasked_rel_logits = (B,N,T,H,W,2*W-1) | (B,N,T,W,H,2*H-1) | (B,N,W,H,T,2*T-1) == (B,N,Z,Y,X,2*X-1)
+            b, n, z, y, x, _ = unmasked_rel_logits.size()
+            # collapse height and heads
+            unmasked_rel_logits = unmasked_rel_logits.reshape(b, n * z * y, x, 2 * x - 1)
+            unmasked_rel_logits = self._relative_position_to_absolute_position_unmasked(unmasked_rel_logits)
+            # now it is B,N*Z*Y,X,X
+            # shape it back for tiling
+            unmasked_rel_logits = unmasked_rel_logits.reshape(b, n, z, y, x, 1, 1, x)
+            # tiling it height times
+            unmasked_rel_logits = unmasked_rel_logits.expand(-1, -1, -1, -1, -1, z, y, -1)
+            # bringing it to the right shape for adding to the logits.
+            unmasked_rel_logits = unmasked_rel_logits.permute(transpose_mask)
+            return unmasked_rel_logits.reshape(-1, num_heads, time * height * width, time * height * width)
+
+        width_unmasked_rel_logits = _compute_3d_relative_logits(width_key_relative_embeddings, [0, 1, 2, 3, 4, 5, 6, 7])
+        logits = logits + width_unmasked_rel_logits
+
+        height_unmasked_rel_logits = _compute_3d_relative_logits(height_key_relative_embeddings.permute(0, 1, 2, 4, 3, 5),
+                                                                 [0, 1, 2, 4, 3, 5, 7, 6])
+        logits = logits + height_unmasked_rel_logits
+
+        time_unmasked_rel_logits = _compute_3d_relative_logits(time_key_relative_embeddings.permute(0, 1, 4, 3, 2, 5),
+                                                               [0, 1, 4, 3, 2, 7, 6, 5])
+        logits = logits + time_unmasked_rel_logits
+        # reshape back the same spatial dimensions as q
+        return logits.reshape(-1, time * height * width, time * height * width)
+
+    def get_relative_embeddings_left_right(self, max_relative_position, length, depth,
+                                           num_heads, heads_share_relative_embedding):
+        """Instantiate or retrieve relative embeddings, sliced according to length.
+        Use for unmasked case where the relative attention looks both left and right.
+        Args:
+          max_relative_position: an Integer for the number of entries in the relative
+            embedding, which corresponds to the max relative distance that is
+            considered.
+          length: an Integer, specifies the length of the input sequence for which
+            this relative embedding is retrieved for.
+          depth: an Integer, specifies the depth for relative embeddings.
+          num_heads: an Integer, specifies the number of heads.
+          heads_share_relative_embedding: a Boolean specifying if the relative
+            embedding is shared across heads.
+        Returns:
+          a Tensor with shape [length, depth]
+        """
+        initializer_stddev = depth ** -0.5
+        max_relative_position_unmasked = 2 * max_relative_position - 1
+        if heads_share_relative_embedding:
+            embedding_shape = (max_relative_position_unmasked, depth)
+        else:
+            embedding_shape = (num_heads, max_relative_position_unmasked, depth)
+        relative_embeddings = torch.randn(embedding_shape) * initializer_stddev
+        # Pad first before slice to avoid using tf.cond.
+        pad_length = max(length - max_relative_position, 0)
+        slice_start_position = max(max_relative_position - length, 0)
+        if heads_share_relative_embedding:
+            padded_relative_embeddings = F.pad(relative_embeddings, (0, 0, pad_length, pad_length))
+            used_relative_embeddings = padded_relative_embeddings[slice_start_position:slice_start_position
+                                                                                       + 2 * length - 1, :]
+        else:
+            padded_relative_embeddings = F.pad(relative_embeddings, (0, 0, pad_length, pad_length, 0, 0))
+            used_relative_embeddings = padded_relative_embeddings[:, slice_start_position:slice_start_position
+                                                                                          + 2 * length - 1]
+        return used_relative_embeddings
+
+    def testDotProductUnMaskedAttentionRelative2d(self, batch, time, height, width, num_heads,
+                                                  max_relative_position, depth, heads_share_relative_embedding):
+        # q = np.random.rand(batch, num_heads, height, width, depth).astype(np.float32)
+        # k = np.random.rand(batch, num_heads, height, width, depth).astype(np.float32)
+        #
+        # a = self.dot_product_unmasked_self_attention_relative_2d(
+        #     torch.from_numpy(q),
+        #     torch.from_numpy(k),
+        #     None,
+        #     max_relative_position=max_relative_position,
+        #     heads_share_relative_embedding=heads_share_relative_embedding)
+        #
+        # res, height_key_relative_embeddings, width_key_relative_embeddings = a
+        # att_output = python_relative_att(
+        #     q, k, batch, num_heads, height, width,
+        #     height_key_relative_embeddings.numpy(), width_key_relative_embeddings.numpy(),
+        #     heads_share_relative_embedding)
+        # assert res.shape == (batch, num_heads, height, width, height, width)
+        # assert np.allclose(res.numpy(), att_output, atol=1.e-6), np.max(np.abs(res.numpy() - att_output))
+        #
+        # q = torch.from_numpy(q).cuda()
+        # k = torch.from_numpy(k).cuda()
+        # logits = torch.einsum('bnhwd, bnxyd -> bnhwxy', q, k).reshape(-1, height * width, height * width)
+        # height_key_relative_embeddings = self._matmul_with_relative_keys_2d(q, height_key_relative_embeddings.cuda(),
+        #                                                                     heads_share_relative_embedding)
+        # h_r = height_key_relative_embeddings.reshape(-1, height * width, 2 * height - 1)
+        # width_key_relative_embeddings = self._matmul_with_relative_keys_2d(q, width_key_relative_embeddings.cuda(),
+        #                                                                    heads_share_relative_embedding)
+        # w_r = width_key_relative_embeddings.reshape(-1, height * width, 2 * width - 1)
+        # new_res = relative_positioning_2d(logits, h_r, w_r, height, width, height, width, None).cpu().view_as(
+        #     res).numpy()
+        # assert np.allclose(new_res, att_output, atol=1.e-6), np.max(np.abs(new_res - att_output))
+
+        q = np.random.rand(batch, num_heads, time, height, width, depth).astype(np.float32)
+        k = np.random.rand(batch, num_heads, time, height, width, depth).astype(np.float32)
+        if heads_share_relative_embedding:
+            t_r = np.random.rand(2 * time - 1, depth).astype(np.float32)
+            h_r = np.random.rand(2 * height - 1, depth).astype(np.float32)
+            w_r = np.random.rand(2 * width - 1, depth).astype(np.float32)
+        else:
+            t_r = np.random.rand(num_heads, 2 * time - 1, depth).astype(np.float32)
+            h_r = np.random.rand(num_heads, 2 * height - 1, depth).astype(np.float32)
+            w_r = np.random.rand(num_heads, 2 * width - 1, depth).astype(np.float32)
+        att_output = python_relative_att_3d(
+            q, k, batch, num_heads, time, height, width,
+            t_r, h_r, w_r,
+            heads_share_relative_embedding)
+
+        q = torch.from_numpy(q).cuda()
+        k = torch.from_numpy(k).cuda()
+        logits = torch.einsum('bnthwd, bnxyzd -> bnthwxyz', q, k).reshape(-1, time * height * width,
+                                                                          time * height * width)
+        time_key_relative_embeddings = self._matmul_with_relative_keys_3d(q, torch.from_numpy(t_r).cuda(),
+                                                                          heads_share_relative_embedding)
+        t_r = time_key_relative_embeddings.reshape(-1, time * height * width, 2 * time - 1)
+        height_key_relative_embeddings = self._matmul_with_relative_keys_3d(q, torch.from_numpy(h_r).cuda(),
+                                                                            heads_share_relative_embedding)
+        h_r = height_key_relative_embeddings.reshape(-1, time * height * width, 2 * height - 1)
+        width_key_relative_embeddings = self._matmul_with_relative_keys_3d(q, torch.from_numpy(w_r).cuda(),
+                                                                           heads_share_relative_embedding)
+        w_r = width_key_relative_embeddings.reshape(-1, time * height * width, 2 * width - 1)
+
+        res = self.dot_product_unmasked_self_attention_relative_3d(q.cpu(), k.cpu(), time_key_relative_embeddings.cpu(),
+                                                                   height_key_relative_embeddings.cpu(),
+                                                                   width_key_relative_embeddings.cpu()).numpy()
+        new_res = relative_positioning_3d(logits, t_r, h_r, w_r, time, height, width, time, height, width,
+                                          None).cpu().numpy()
+        assert np.allclose(res, att_output, atol=1.e-6), np.max(np.abs(res - att_output))
+        assert np.allclose(new_res, att_output, atol=1.e-6), np.max(np.abs(new_res - att_output))
+
+
+class TensorFlowClass:
     def evaluate(self, tensors):
         """Evaluates tensors and returns numpy values.
         Args:
@@ -343,7 +693,7 @@ class TestClass:
 
         self.evaluate(tf.compat.v1.global_variables_initializer())
         res, height_key_relative_embeddings, width_key_relative_embeddings = self.evaluate(a)
-        att_output = self.python_relative_att(
+        att_output = python_relative_att(
             q, k, batch, num_heads, height, width,
             height_key_relative_embeddings, width_key_relative_embeddings,
             heads_share_relative_embedding)
@@ -352,18 +702,22 @@ class TestClass:
 
 
 def main():
-    a = TestClass()
-    for _ in trange(50):
-        for heads_share_relative_embedding in (True, False):
-            for params in (
-                    (1, 10, 12, 2, 6, 3),
-                    (1, 1, 12, 2, 6, 3),
-                    (2, 10, 1, 2, 6, 3),
-                    (1, 10, 12, 2, 1, 1),
-                    (1, 10, 12, 2, 2, 8),
-                    (4, 10, 12, 2, 12, 10),
-            ):
-                a.testDotProductUnMaskedAttentionRelative2dSharedOneRow(*params, heads_share_relative_embedding)
+    for a in trange(1):
+        if a == 0:
+            a = PytorchTest()
+        else:
+            a = TensorFlowClass()
+        for _ in trange(25):
+            for heads_share_relative_embedding in (True, False):
+                for params in (
+                        (1, 1, 10, 12, 2, 6, 3),
+                        (1, 4, 1, 12, 2, 6, 3),
+                        (2, 2, 10, 1, 2, 6, 3),
+                        (1, 2, 10, 12, 2, 1, 1),
+                        (1, 4, 10, 12, 2, 2, 8),
+                        (4, 1, 10, 12, 2, 12, 10),
+                ):
+                    a.testDotProductUnMaskedAttentionRelative2d(*params, heads_share_relative_embedding)
 
 
 if __name__ == '__main__':
