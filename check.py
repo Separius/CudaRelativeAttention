@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 
+from cuda_implementation import relative_positioning_2d
 from np_implementation import python_relative_att_nd
 from pt_code import python_relative_att, pytorch_relative_att_fused
 from pytorch_implementation import pytorch_relative_att_fused_nd
@@ -49,14 +50,24 @@ def compare_old():
         height_key_relative_embeddings = torch.randn(num_heads, 2 * height - 1, d)
         width_key_relative_embeddings = torch.randn(num_heads, 2 * width - 1, d)
         torch_ans = pytorch_relative_att_fused(q, k, height_key_relative_embeddings,
-                                               width_key_relative_embeddings).numpy()
+                                               width_key_relative_embeddings)
         numpy_ans = python_relative_att(q.numpy(), k.numpy(),
                                         batch, num_heads, height, width,
                                         height_key_relative_embeddings,
                                         width_key_relative_embeddings,
                                         False)
-        assert np.allclose(torch_ans, numpy_ans, atol=1.e-6), \
+        logits = torch.einsum('bnhwd, bnxyd -> bnhwxy', q, k).reshape(batch * num_heads, height * width,
+                                                                      height * width).cuda()
+        rh = torch.einsum('bnhwd, nmd -> bnhwm', q, height_key_relative_embeddings).reshape(batch * num_heads,
+                                                                                            height * width, -1).cuda()
+        rw = torch.einsum('bnhwd, nmd -> bnhwm', q, width_key_relative_embeddings).reshape(batch * num_heads,
+                                                                                           height * width, -1).cuda()
+        my_ans = relative_positioning_2d(logits, rh, rw, height, width, height, width,
+                                         None).cpu().view_as(torch_ans).numpy()
+        assert np.allclose(my_ans, numpy_ans, atol=1.e-6), \
             f'error: {np.max(np.abs(torch_ans, numpy_ans))}, iter: {i}'
+        assert np.allclose(torch_ans.numpy(), numpy_ans, atol=1.e-6), \
+            f'error: {np.max(np.abs(torch_ans.numpy(), numpy_ans))}, iter: {i}'
 
 
 if __name__ == '__main__':
