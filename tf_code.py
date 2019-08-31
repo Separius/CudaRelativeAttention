@@ -1,3 +1,6 @@
+import math
+from enum import Enum
+
 import numpy as np
 import tensorflow as tf
 import torch
@@ -16,7 +19,7 @@ from cuda_implementation import relative_positioning_2d, relative_positioning_3d
 
 
 def python_relative_att_nd(q, k, time_key_relative_embeddings, height_key_relative_embeddings,
-                           width_key_relative_embeddings, heads_share_relative_embedding):
+                           width_key_relative_embeddings, heads_share_relative_embedding, mask):
     """Relative attention computation in numpy.
     Args:
         q: [batch, heads, time or None, height or None, width, depth]
@@ -24,6 +27,7 @@ def python_relative_att_nd(q, k, time_key_relative_embeddings, height_key_relati
         time_key_relative_embeddings: [heads or None, 2 * time - 1, depth]
         height_key_relative_embeddings: [heads or None, 2 * height - 1, depth]
         width_key_relative_embeddings: [heads or None, 2 * width - 1, depth]
+        mask: Optional([batch * heads or None, time * height * width, time * height * width])
     Returns:
         logits: [batch * num_heads, time * height * width, time * height * width]
     """
@@ -62,35 +66,81 @@ def python_relative_att_nd(q, k, time_key_relative_embeddings, height_key_relati
                     logit += x_rel_logit(width_key_relative_embeddings, width - 1 + k_w - q_w)
                     logit += x_rel_logit(height_key_relative_embeddings, height - 1 + k_h - q_h)
                     logit += x_rel_logit(time_key_relative_embeddings, time - 1 + k_t - q_t)
+                    if mask is not None:
+                        if mask.ndim == 2:
+                            logit += -10000.0 if mask[i, j] else 0.0
+                        else:
+                            logit += -10000.0 if mask[b * num_heads + h, i, j] else 0.0
                     logits[b * num_heads + h, i, j] = logit
     return np.reshape(logits, (batch * num_heads, time * height * width, time * height * width))
 
 
 class RelativeAttention(nn.Module):
-    def __init__(self, num_heads, head_depth, n_dimension, use_custom_cuda_kernel,
-                 max_relative_positions, heads_share_relative_embeddings):
+    def __init__(self, n_dimension, num_heads, model_depth, max_relative_positions,
+                 heads_share_relative_embeddings=True, embedding_padding_modes=EmbeddingPaddingMode.Replication,
+                 position_embedding_types=PositionEmbeddingType.Learned,
+                 key_start_positions=KeyStartPosition.BeforeQuery, use_custom_cuda_kernel=True):
         super().__init__()
+        assert model_depth % num_heads == 0
         assert 1 <= n_dimension <= 3
+
         self.use_custom_cuda_kernel = use_custom_cuda_kernel
+        self.head_depth = model_depth // num_heads
         self.n_dimension = n_dimension
-        self.head_depth = head_depth
-        if not isinstance(max_relative_positions, (list, tuple)):
-            max_relative_positions = [max_relative_positions] * n_dimension  # w, h, t
-        self.max_relative_positions = max_relative_positions
         self.num_heads = num_heads
-        if not isinstance(heads_share_relative_embeddings, (list, tuple)):
-            heads_share_relative_embeddings = [heads_share_relative_embeddings] * n_dimension  # w, h, t
-        self.heads_share_relative_embeddings = heads_share_relative_embeddings
-        initializer_stddev = head_depth ** -0.5
-        self.relative_embeddings = nn.ParameterList()
-        for max_relative_position, heads_share_relative_embedding in zip(max_relative_positions,
-                                                                         heads_share_relative_embeddings):
-            max_relative_position_unmasked = 2 * max_relative_position - 1
+
+        self.max_relative_positions = self._get_list(max_relative_positions, int)
+        self.heads_share_relative_embeddings = self._get_list(heads_share_relative_embeddings, bool)
+        self.embedding_padding_modes = self._get_list(embedding_padding_modes, EmbeddingPaddingMode)
+        self.position_embedding_types = self._get_list(position_embedding_types, PositionEmbeddingType)
+        self.key_start_positions = self._get_list(key_start_positions, KeyStartPosition)
+
+        self.relative_embeddings = nn.ParameterList([self._get_embedding(i) for i in range(n_dimension)])
+
+    def _get_embedding(self, dim_index):
+        initializer_stddev = self.head_depth ** -0.5
+        max_relative_position = self.max_relative_positions[dim_index]
+        heads_share_relative_embedding = self.heads_share_relative_embeddings[dim_index]
+        embedding_padding_mode = self.embedding_padding_modes[dim_index]
+        position_embedding_type = self.position_embedding_types[dim_index]
+        key_start_position = self.key_start_positions[dim_index]
+
+        for max_relative_position, heads_share_relative_embedding \
+                in zip(max_relative_positions, heads_share_relative_embeddings):
+            max_relative_position_unmasked = max_relative_position * 2 - 1
             if heads_share_relative_embedding:
                 embedding_shape = (max_relative_position_unmasked, head_depth)
             else:
                 embedding_shape = (num_heads, max_relative_position_unmasked, head_depth)
             self.relative_embeddings.append(nn.Parameter(torch.randn(embedding_shape) * initializer_stddev))
+
+    def _get_list(self, optional_list, desired_class):
+        if not isinstance(optional_list, (list, tuple)):
+            obj_list = [optional_list] * self.n_dimension  # w, h, t
+        else:
+            obj_list = optional_list
+        desired_list = []
+        for obj in obj_list:
+            if desired_class == int:
+                if isinstance(obj, int):
+                    desired_list.append(obj)
+                else:
+                    desired_list.append(int(obj))
+            elif desired_class == bool:
+                if isinstance(obj, bool):
+                    desired_list.append(obj)
+                else:
+                    desired_list.append(bool(obj))
+            else:  # enum cases
+                if isinstance(obj, desired_class):
+                    desired_list.append(obj)
+                elif isinstance(obj, str):
+                    desired_list.append(desired_class[obj])
+                elif isinstance(obj, int):
+                    desired_list.append(desired_class(obj))
+                else:
+                    raise ValueError(f'invalid input({obj}) for enum {desired_class}')
+        return desired_list
 
     def forward(self, q, k, mask=None):
         """forward function for RelativeAttention.
@@ -131,19 +181,6 @@ class RelativeAttention(nn.Module):
                     mask = mask.unsqueeze(0)
                 return logits + mask.to(logits.dtype) * -10000.0
             return logits
-
-    @staticmethod
-    def matmul_with_relative_keys(query, distance_embedding, heads_share_relative_embedding):
-        """Helper function for dot_product_unmasked_self_attention_relative_{2, 3}d.
-        Args:
-            query: [batch, heads, None or T, None or H, W, d]
-            distance_embedding: [None or heads, length, d]
-        Returns:
-            res: [batch, heads, None or T, None or H, W, length]
-        """
-        dim_str = 'xyz'[:query.ndim - 3]
-        head_str = '' if heads_share_relative_embedding else 'h'
-        return torch.einsum(f'bh{dim_str}d,{head_str}md->bh{dim_str}m', query, distance_embedding)
 
     @staticmethod
     def relative_position_to_absolute_position(x):
@@ -284,6 +321,13 @@ class RelativeAttention(nn.Module):
         width_unmasked_rel_logits = self._compute_1d_relative_logits(self.compute_rel_logits(q, width, 0))
         logits = logits + width_unmasked_rel_logits
         return logits.reshape(batch * num_heads, width, width)
+
+
+class RelativeAttention1d(RelativeAttention):
+    def __init__(self, num_heads, model_depth, max_relative_positions, use_custom_cuda_kernel=False,
+                 heads_share_relative_embeddings=True, embedding_padding='replication'):
+        super().__init__(1, num_heads, model_depth, max_relative_positions, use_custom_cuda_kernel,
+                         heads_share_relative_embeddings, embedding_padding)
 
 
 class PytorchTest:
@@ -657,6 +701,8 @@ if __name__ == '__main__':
     main()
 
 # TODO
+#   abcd terms of xl-transformer
+#   embedding = static, learned, partial
 #   x_q, x_k
 #   speed test for 2d, 3d, 2d_new_fused?, 3d_new_fused?
 #   backward test for 2d, 3d, 2d_new_fused?, 3d_new_fused?
