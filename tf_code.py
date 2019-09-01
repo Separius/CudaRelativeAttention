@@ -285,8 +285,6 @@ class TensorFlowTest:
         return q, k, res, height_key_relative_embeddings, width_key_relative_embeddings
 
 # TODO
-#   abcd terms of xl-transformer
 #   speed test for {2d, 3d} * {forward, backward}
 #   grad test for {2d, 3d}
 #   memory test for {2d, 3d} * {forward, backward}
-#   diff configs are runnable test
