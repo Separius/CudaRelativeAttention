@@ -13,7 +13,10 @@ class RelativeAttention(nn.Module):
                  max_relative_positions_future=None, heads_share_relative_embeddings=True,
                  embedding_padding_modes=EmbeddingPaddingMode.Extend,
                  position_embedding_types=PositionEmbeddingType.Hybrid,
-                 key_start_positions=KeyStartPosition.BeforeQuery, use_custom_cuda_kernel=True):
+                 key_start_positions=KeyStartPosition.BeforeQuery,
+                 add_bias_to_query_for_relative_logits=True,  # the d term in transformer-xl(second equation in page 5)
+                 add_bias_to_query_for_key_logit=True,  # the b term in transformer-xl(second equation in page 5)
+                 use_custom_cuda_kernel=True):
         super().__init__()
         assert model_depth % num_heads == 0
         assert 1 <= n_dim <= 3
@@ -30,6 +33,17 @@ class RelativeAttention(nn.Module):
         embedding_padding_modes = self._get_list(embedding_padding_modes, EmbeddingPaddingMode)
         position_embedding_types = self._get_list(position_embedding_types, PositionEmbeddingType)
         key_start_positions = self._get_list(key_start_positions, KeyStartPosition)
+        add_bias_to_query_for_relative_logits = self._get_list(add_bias_to_query_for_relative_logits, bool)
+        self.relative_biases = []
+        for i in range(n_dim):
+            new_param = nn.Parameter(torch.randn(self.head_depth, num_heads) * 0.01) \
+                if add_bias_to_query_for_relative_logits[i] else None
+            self.register_parameter('relative_bias_{}'.format(i + 1), new_param)
+            self.relative_biases.append(new_param)
+        if add_bias_to_query_for_key_logit:
+            self.query_to_key_bias = nn.Parameter(torch.randn(num_heads, self.head_depth) * 0.01)
+        else:
+            self.register_parameter('query_to_key_bias', None)
         self.relative_embeddings = nn.ModuleList([DistanceEmbedding(self.head_depth, max_relative_positions_past[i],
                                                                     max_relative_positions_future[i], num_heads,
                                                                     heads_share_relative_embeddings[i],
@@ -96,10 +110,12 @@ class RelativeAttention(nn.Module):
             return logits + mask.to(logits.dtype) * -10000.0
         return logits
 
-    @staticmethod
-    def get_logits(q, k):
+    def get_logits(self, q, k):
         # q is (B, N, ..., d) and k is also (B, N, ..., d); Note that m,n,o are in the middle of alphabet
         # => logits with shape == (B * N, Sq, Sk)
+        if self.query_to_key_bias is not None:
+            # q is (B, N, ..., d) and bias is (N, d)
+            q = q + self.query_to_key_bias.view(1, q.size(1), *([1] * (q.ndim - 3)), -1)
         return torch.einsum(
             'mn{q_dims}o, mn{k_dims}o -> mn{q_dims}{k_dims}'.format(q_dims=string.ascii_lowercase[:q.ndim - 3],
                                                                     k_dims=string.ascii_lowercase[::-1][:k.ndim - 3]),
@@ -110,10 +126,12 @@ class RelativeAttention1d(RelativeAttention):
     def __init__(self, num_heads, model_depth, max_relative_positions_past, max_relative_positions_future=None,
                  heads_share_relative_embeddings=True, embedding_padding_modes=EmbeddingPaddingMode.Extend,
                  position_embedding_types=PositionEmbeddingType.Hybrid,
-                 key_start_positions=KeyStartPosition.BeforeQuery):
+                 key_start_positions=KeyStartPosition.BeforeQuery, add_bias_to_query_for_relative_logits=True,
+                 add_bias_to_query_for_key_logit=True):
         super().__init__(1, num_heads, model_depth, max_relative_positions_past, max_relative_positions_future,
                          heads_share_relative_embeddings, embedding_padding_modes, position_embedding_types,
-                         key_start_positions, use_custom_cuda_kernel=False)
+                         key_start_positions, add_bias_to_query_for_relative_logits, add_bias_to_query_for_key_logit,
+                         use_custom_cuda_kernel=False)
 
     def forward(self, q, k, mask=None):
         """forward function for RelativeAttention.
@@ -125,11 +143,13 @@ class RelativeAttention1d(RelativeAttention):
             Returns:
                 logits: [batch * heads, Wq, Wk]
         """
-        assert not self.use_custom_cuda_kernel
-        assert q.size() == k.size(), 'RelativeAttention1d only supports self attention so q.size() == k.size()'
+        if self.use_custom_cuda_kernel:
+            raise ValueError('can not use custom cuda kernel with 1d')
+        if not q.size() == k.size():
+            raise ValueError('RelativeAttention1d only supports self attention so q.size() == k.size()')
         batch, num_heads, width, _ = q.size()
         logits = self.get_logits(q, k)
-        distance_logits = self.relative_embeddings[0](width, q)
+        distance_logits = self.relative_embeddings[0](width, q, self.relative_biases[0])
         width_rel_logits = self.relative_position_to_absolute_position(distance_logits).view_as(logits)
         return self.apply_mask(logits + width_rel_logits, mask)
 
@@ -138,10 +158,12 @@ class RelativeAttention2d(RelativeAttention):
     def __init__(self, num_heads, model_depth, max_relative_positions_past, max_relative_positions_future=None,
                  heads_share_relative_embeddings=True, embedding_padding_modes=EmbeddingPaddingMode.Extend,
                  position_embedding_types=PositionEmbeddingType.Hybrid,
-                 key_start_positions=KeyStartPosition.BeforeQuery, use_custom_cuda_kernel=True):
+                 key_start_positions=KeyStartPosition.BeforeQuery, add_bias_to_query_for_relative_logits=True,
+                 add_bias_to_query_for_key_logit=True, use_custom_cuda_kernel=True):
         super().__init__(2, num_heads, model_depth, max_relative_positions_past, max_relative_positions_future,
                          heads_share_relative_embeddings, embedding_padding_modes, position_embedding_types,
-                         key_start_positions, use_custom_cuda_kernel)
+                         key_start_positions, add_bias_to_query_for_relative_logits, add_bias_to_query_for_key_logit,
+                         use_custom_cuda_kernel)
 
     def forward(self, q, k, mask=None):
         """forward function for RelativeAttention.
@@ -156,13 +178,14 @@ class RelativeAttention2d(RelativeAttention):
         batch, num_heads, height_q, width_q, _ = q.size()
         batch, num_heads, height_k, width_k, _ = k.size()
         logits = self.get_logits(q, k)
-        wr = self.relative_embeddings[0](width_q, q, width_k)
-        hr = self.relative_embeddings[1](height_q, q, height_k)
+        wr = self.relative_embeddings[0](width_q, q, self.relative_biases[0], width_k)
+        hr = self.relative_embeddings[1](height_q, q, self.relative_biases[1], height_k)
         if self.use_custom_cuda_kernel and torch.cuda.is_available() and q.is_cuda:
             xr_shape = (batch * num_heads, height_q * width_q, -1)
             return relative_positioning_2d(logits, hr.reshape(xr_shape), wr.reshape(xr_shape),
                                            height_q, width_q, height_k, width_k, mask)
-        assert q.size() == k.size(), 'basic RelativeAttention2d only supports self attention so q.size() == k.size()'
+        if not q.size() == k.size():
+            raise ValueError('basic RelativeAttention2d only supports self attention so q.size() == k.size()')
         width_unmasked_rel_logits = self._compute_2d_relative_logits(wr, height_q, width_q,
                                                                      [0, 1, 2, 4, 3, 5]).view_as(logits)
         height_unmasked_rel_logits = self._compute_2d_relative_logits(hr.permute(0, 1, 3, 2, 4), width_q, height_q,
@@ -187,10 +210,12 @@ class RelativeAttention3d(RelativeAttention):
     def __init__(self, num_heads, model_depth, max_relative_positions_past, max_relative_positions_future=None,
                  heads_share_relative_embeddings=True, embedding_padding_modes=EmbeddingPaddingMode.Extend,
                  position_embedding_types=PositionEmbeddingType.Hybrid,
-                 key_start_positions=KeyStartPosition.BeforeQuery, use_custom_cuda_kernel=True):
+                 key_start_positions=KeyStartPosition.BeforeQuery, add_bias_to_query_for_relative_logits=True,
+                 add_bias_to_query_for_key_logit=True, use_custom_cuda_kernel=True):
         super().__init__(3, num_heads, model_depth, max_relative_positions_past, max_relative_positions_future,
                          heads_share_relative_embeddings, embedding_padding_modes, position_embedding_types,
-                         key_start_positions, use_custom_cuda_kernel)
+                         key_start_positions, add_bias_to_query_for_relative_logits, add_bias_to_query_for_key_logit,
+                         use_custom_cuda_kernel)
 
     def forward(self, q, k, mask=None):
         """forward function for RelativeAttention.
@@ -205,14 +230,15 @@ class RelativeAttention3d(RelativeAttention):
         batch, num_heads, time_q, height_q, width_q, _ = q.size()
         batch, num_heads, time_k, height_k, width_k, _ = k.size()
         logits = self.get_logits(q, k)
-        wr = self.relative_embeddings[0](width_q, q, width_k)
-        hr = self.relative_embeddings[1](height_q, q, height_k)
-        tr = self.relative_embeddings[2](time_q, q, time_k)
+        wr = self.relative_embeddings[0](width_q, q, self.relative_biases[0], width_k)
+        hr = self.relative_embeddings[1](height_q, q, self.relative_biases[1], height_k)
+        tr = self.relative_embeddings[2](time_q, q, self.relative_biases[2], time_k)
         if self.use_custom_cuda_kernel and torch.cuda.is_available() and q.is_cuda:
             xr_shape = (batch * num_heads, time_q * height_q * width_q, -1)
             return relative_positioning_3d(logits, tr.reshape(xr_shape), hr.reshape(xr_shape), wr.reshape(xr_shape),
                                            time_q, height_q, width_q, time_k, height_k, width_k, mask)
-        assert q.size() == k.size(), 'basic RelativeAttention3d only supports self attention so q.size() == k.size()'
+        if not q.size() == k.size():
+            raise ValueError('basic RelativeAttention3d only supports self attention so q.size() == k.size()')
         width_rel_logits = self._compute_3d_relative_logits(wr, [0, 1, 2, 3, 4, 5, 6, 7]).view_as(logits)
         height_rel_logits = self._compute_3d_relative_logits(hr.permute(0, 1, 2, 4, 3, 5),
                                                              [0, 1, 2, 4, 3, 5, 7, 6]).view_as(logits)

@@ -85,14 +85,18 @@ class DistanceEmbedding(nn.Module):
         return self.embedding
 
     @staticmethod
-    def matmul_with_relative_keys(query, distance_embedding, heads_share_relative_embedding):
+    def matmul_with_relative_keys(query, distance_embedding, heads_share_relative_embedding, bias=None):
         """Helper function for dot_product_unmasked_self_attention_relative_nd.
         Args:
             query: [batch, heads, None or T, None or H, W, d]
             distance_embedding: [None or heads, d, length]
+            bias: Optional([heads, d])
         Returns:
             res: [batch, heads, None or T, None or H, W, length]
         """
+        if bias is not None:
+            # q is (B, N, ..., d) and bias is (N, d)
+            query = query + bias.view(1, query.size(1), *([1] * (query.ndim - 3)), -1)
         dim_str = 'xyz'[:query.ndim - 3]
         head_str = '' if heads_share_relative_embedding else 'h'
         return torch.einsum(f'bh{dim_str}d,{head_str}dm->bh{dim_str}m', query, distance_embedding)
@@ -127,10 +131,10 @@ class DistanceEmbedding(nn.Module):
     def prune_embedding(self, past_len, future_len, embedding):
         return embedding[..., max(0, self.last_past - past_len):self.last_past + future_len]
 
-    def forward(self, q_len, q=None, k_len=None):
+    def forward(self, q_len, q=None, bias=None, k_len=None):
         if k_len is None:
             k_len = q_len
         distance_embedding = self.get_distance_embedding(q_len, k_len)
         if q is None:
             return distance_embedding
-        return self.matmul_with_relative_keys(q, distance_embedding, self.heads_share_relative_embedding)
+        return self.matmul_with_relative_keys(q, distance_embedding, self.heads_share_relative_embedding, bias)
