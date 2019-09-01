@@ -250,8 +250,6 @@ std::vector<torch::Tensor> relative_positioning_backward_3d_cuda(
                                 torch::dtype(grad_out.dtype()).device(grad_out.device()));
   auto grad_h_r = torch::zeros({grad_out.size(0), grad_out.size(1), h_k + h_q - 1},
                                 torch::dtype(grad_out.dtype()).device(grad_out.device()));
-  auto grad_w_r = torch::zeros({grad_out.size(0), grad_out.size(1), w_k + w_q - 1},
-                                torch::dtype(grad_out.dtype()).device(grad_out.device()));
 
   {
       auto grad_out_sum_w = grad_out_view.sum({4});
@@ -280,6 +278,8 @@ std::vector<torch::Tensor> relative_positioning_backward_3d_cuda(
           gpuErrchk(cudaDeviceSynchronize());
       }
   }
+  auto grad_w_r = torch::zeros({grad_out.size(0), grad_out.size(1), w_k + w_q - 1},
+                                torch::dtype(grad_out.dtype()).device(grad_out.device()));
   {
       const dim3 threads_w(w_k, w_q);
       auto grad_out_sum_h_t = grad_out_view.sum({2, 3});

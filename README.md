@@ -19,6 +19,7 @@ q = torch.randn(batch_size, num_heads, q_height, q_width, model_depth // num_hea
 k = torch.randn(batch_size, num_heads, k_height, k_width, model_depth // num_heads).cuda()
 if use_mask:
   mask = (torch.randn(batch_size * num_heads, q_height * q_width, k_height * k_width) > 0).cuda()
+  # or just (q_height * q_width, k_height * k_width)
 else:
   mask = None
 logits = net(q, k, mask)

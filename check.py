@@ -238,11 +238,11 @@ def grad_check():
 
 
 def speed_check():
-    model_depth = 64
+    model_depth = 32
     num_heads = 4
     width = 16
     height = 16
-    time_ = 8
+    time_ = 4
     num_runs = 1000
     speed_tqdm = tqdm([False, True, False, True], desc='speed check')
     shared_params = dict(max_relative_positions_future=None, heads_share_relative_embeddings=True,
@@ -259,7 +259,7 @@ def speed_check():
             B = 32
             net = RelativeAttention2d(num_heads, model_depth, [width, height], **shared_params).cuda()
         else:
-            B = 16
+            B = 8
             net = RelativeAttention3d(num_heads, model_depth, [width, height, time_], **shared_params).cuda()
         with torch.set_grad_enabled(backward):
             if i // 2 == 0:
@@ -306,12 +306,12 @@ def speed_check():
 def run_profiler():
     for is_2d in (True, False):
         for is_custom in (True, False):
-            model_depth = 64
-            B = 32 if is_2d else 16
+            model_depth = 32
+            B = 32 if is_2d else 8
             num_heads = 8 if is_2d else 4
-            width = 32 if is_2d else 16
-            height = 32 if is_2d else 16
-            time_ = 8
+            width = 16 if is_2d else 8
+            height = 16 if is_2d else 8
+            time_ = 4
             shared_params = dict(heads_share_relative_embeddings=True,
                                  embedding_padding_modes=EmbeddingPaddingMode.Extend,
                                  position_embedding_types=PositionEmbeddingType.Hybrid,
@@ -327,33 +327,30 @@ def run_profiler():
             m = (torch.randn(B * num_heads, height * width * (1 if is_2d else time_),
                              height * width * (1 if is_2d else time_)) > 0).cuda()
             func_list = [[run_3d_default, run_3d_custom], [run_2d_default, run_2d_custom]]
+            net.use_custom_cuda_kernel = is_custom
             func_list[is_2d][is_custom](net, q, k, m)
 
 
 @profile
 def run_2d_custom(net, q, k, m):
-    net.use_custom_cuda_kernel = True
     ans = net(q, k, m)
     ans.mean().backward()
 
 
 @profile
 def run_2d_default(net, q, k, m):
-    net.use_custom_cuda_kernel = False
     ans = net(q, k, m)
     ans.mean().backward()
 
 
 @profile
 def run_3d_custom(net, q, k, m):
-    net.use_custom_cuda_kernel = True
     ans = net(q, k, m)
     ans.mean().backward()
 
 
 @profile
 def run_3d_default(net, q, k, m):
-    net.use_custom_cuda_kernel = False
     ans = net(q, k, m)
     ans.mean().backward()
 
@@ -368,12 +365,8 @@ if __name__ == '__main__':
     correctness_check_3d()
     config_check()
     grad_check()
-    if torch.cuda.is_available():
-        speed_check()
+    speed_check()
+    if profiler_is_available:
+        run_profiler()
     else:
-        print('skipping speed tests')
-    if torch.cuda.is_available():
-        if profiler_is_available:
-            run_profiler()
-        else:
-            print('skipping memory profile checks')
+        print('skipping memory profile checks')
