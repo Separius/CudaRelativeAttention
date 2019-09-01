@@ -182,7 +182,7 @@ class RelativeAttention2d(RelativeAttention):
         hr = self.relative_embeddings[1](height_q, q, self.relative_biases[1], height_k)
         if self.use_custom_cuda_kernel and torch.cuda.is_available() and q.is_cuda:
             xr_shape = (batch * num_heads, height_q * width_q, -1)
-            return relative_positioning_2d(logits, hr.reshape(xr_shape), wr.reshape(xr_shape),
+            return relative_positioning_2d(logits.contiguous(), hr.reshape(xr_shape), wr.reshape(xr_shape),
                                            height_q, width_q, height_k, width_k, mask)
         if not q.size() == k.size():
             raise ValueError('basic RelativeAttention2d only supports self attention so q.size() == k.size()')
@@ -235,7 +235,8 @@ class RelativeAttention3d(RelativeAttention):
         tr = self.relative_embeddings[2](time_q, q, self.relative_biases[2], time_k)
         if self.use_custom_cuda_kernel and torch.cuda.is_available() and q.is_cuda:
             xr_shape = (batch * num_heads, time_q * height_q * width_q, -1)
-            return relative_positioning_3d(logits, tr.reshape(xr_shape), hr.reshape(xr_shape), wr.reshape(xr_shape),
+            return relative_positioning_3d(logits.contiguous(), tr.reshape(xr_shape),
+                                           hr.reshape(xr_shape), wr.reshape(xr_shape),
                                            time_q, height_q, width_q, time_k, height_k, width_k, mask)
         if not q.size() == k.size():
             raise ValueError('basic RelativeAttention3d only supports self attention so q.size() == k.size()')

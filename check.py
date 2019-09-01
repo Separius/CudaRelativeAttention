@@ -1,9 +1,12 @@
+import time
+
 import torch
 import numpy as np
 from tqdm import trange, tqdm
 
+from cuda_implementation import relative_positioning_2d, relative_positioning_3d
 from np_implementation import python_relative_att_nd
-from relative_embedding import EmbeddingPaddingMode, PositionEmbeddingType
+from relative_embedding import EmbeddingPaddingMode, PositionEmbeddingType, KeyStartPosition
 from relative_attention import RelativeAttention1d, RelativeAttention2d, RelativeAttention3d
 
 tf_is_available = True
@@ -15,14 +18,6 @@ except:
 
 def assert_equal(a, b):
     assert np.allclose(a, b, atol=1.e-5), np.max(np.abs(a - b))
-
-
-def must_fail(f, *args, **kwargs):
-    try:
-        f(*args, **kwargs)
-        assert False
-    except:
-        pass
 
 
 def correctness_check_1d_basic():
@@ -207,6 +202,101 @@ def config_check():
                                                         config_tqdm.update()
 
 
+def grad_check():
+    for i in trange(10, desc='grad check'):
+        for j in range(2):
+            if i == 0: H = 1; B = 1; w_q = h_q = 1; w_k = h_k = 1; t_k = t_q = 1
+            if i == 1: H = 1; B = 1; w_q = h_q = 2; w_k = h_k = 1; t_k = t_q = 2
+            if i == 2: H = 1; B = 2; w_q = h_q = 1; w_k = h_k = 2; t_k = t_q = 4
+            if i == 3: H = 1; B = 2; w_q = h_q = 4; w_k = h_k = 4; t_k = t_q = 1
+            if i == 4: H = 2; B = 1; w_q = h_q = 8; w_k = h_k = 4; t_k = 1; t_q = 2
+            if i == 5: H = 2; B = 1; w_q = h_q = 1; w_k = h_k = 8; t_k = 2; t_q = 1
+            if i == 6: H = 2; B = 2; w_q = h_q = 8; w_k = h_k = 1; t_k = 4; t_q = 1
+            if i == 7: H = 2; B = 2; w_q = 2; h_q = 4; w_k = 1; h_k = 2; t_k = 1; t_q = 4
+            if i == 8: H = 4; B = 1; w_q = 2; h_q = 4; w_k = 4; h_k = 2; t_k = 2; t_q = 2
+            if i == 9: H = 4; B = 2; w_q = 4; h_q = 2; w_k = 2; h_k = 1; t_k = 2; t_q = 4
+            N = B * H
+            if j == 0:
+                t_k = t_q = 1
+            logits = torch.randn(N, w_q * h_q * t_q, w_k * h_k * t_k).double().cuda().requires_grad_()
+            r_w = torch.randn(N, w_q * h_q * t_q, w_q + w_k - 1).double().cuda().requires_grad_()
+            r_h = torch.randn(N, w_q * h_q * t_q, h_q + h_k - 1).double().cuda().requires_grad_()
+            for mi, mask in enumerate((None, (torch.randn(w_q * h_q * t_q, w_k * h_k * t_k) > 0).bool().cuda(),
+                                       (torch.randn(N, w_q * h_q * t_q, w_k * h_k * t_k) > 0).bool().cuda())):
+                if j == 0:
+                    torch.autograd.gradcheck(relative_positioning_2d, (logits, r_h, r_w, h_q, w_q, h_k, w_k, mask))
+                else:
+                    r_t = torch.randn(N, w_q * h_q * t_q, t_q + t_k - 1).double().cuda().requires_grad_()
+                    torch.autograd.gradcheck(relative_positioning_3d,
+                                             (logits, r_t, r_h, r_w, t_q, h_q, w_q, t_k, h_k, w_k, mask))
+
+
+def speed_check():
+    model_depth = 64
+    num_heads = 4
+    width = 16
+    height = 16
+    time_ = 8
+    num_runs = 1000
+    speed_tqdm = tqdm([False, True, False, True], desc='speed check')
+    shared_params = dict(max_relative_positions_future=None, heads_share_relative_embeddings=True,
+                         embedding_padding_modes=EmbeddingPaddingMode.Extend,
+                         position_embedding_types=PositionEmbeddingType.Hybrid,
+                         key_start_positions=KeyStartPosition.BeforeQuery, add_bias_to_query_for_relative_logits=True,
+                         add_bias_to_query_for_key_logit=True, use_custom_cuda_kernel=True)
+    forward_speedup_2d = 'N/A'
+    backward_speedup_2d = 'N/A'
+    forward_speedup_3d = 'N/A'
+    backward_speedup_3d = 'N/A'
+    for i, backward in enumerate(speed_tqdm):
+        if i // 2 == 0:
+            B = 32
+            net = RelativeAttention2d(num_heads, model_depth, [width, height], **shared_params).cuda()
+        else:
+            B = 16
+            net = RelativeAttention3d(num_heads, model_depth, [width, height, time_], **shared_params).cuda()
+        with torch.set_grad_enabled(backward):
+            if i // 2 == 0:
+                q = torch.randn(B, num_heads, height, width, model_depth // num_heads).cuda()
+            else:
+                q = torch.randn(B, num_heads, time_, height, width, model_depth // num_heads).cuda()
+            k = torch.randn_like(q).cuda()
+            if backward:
+                q.requires_grad_()
+                k.requires_grad_()
+            for j in range(2):
+                if j == 0:
+                    net.use_custom_cuda_kernel = True
+                else:
+                    net.use_custom_cuda_kernel = False
+                # warmup
+                ans = net(q, k)
+                if backward:
+                    ans.mean().backward()
+                start = time.time()
+                for _ in trange(num_runs):
+                    ans = net(q, k)
+                    if backward:
+                        ans.mean().backward()
+                if j == 0:
+                    custom = time.time() - start
+                else:
+                    default = time.time() - start
+            del ans
+            if i // 2 == 0:
+                if backward:
+                    backward_speedup_2d = default / custom
+                else:
+                    forward_speedup_2d = default / custom
+            else:
+                if backward:
+                    backward_speedup_3d = default / custom
+                else:
+                    forward_speedup_3d = default / custom
+            speed_tqdm.set_description(f'f2: {backward_speedup_2d}, b2: {forward_speedup_2d}, '
+                                       f'f3:{forward_speedup_3d}, b3:{backward_speedup_3d}')
+
+
 if __name__ == '__main__':
     # correctness_check_1d_basic()
     # correctness_check_2d()
@@ -215,4 +305,10 @@ if __name__ == '__main__':
     # else:
     #     print('skipping tf check')
     # correctness_check_3d()
-    config_check()
+    # config_check()
+    # grad_check()
+    if torch.cuda.is_available():
+        speed_check()
+        # speed_check_3d()
+    else:
+        print('skipping speed tests')
