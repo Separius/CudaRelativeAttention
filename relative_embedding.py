@@ -1,5 +1,5 @@
-from enum import Enum
 import math
+from enum import Enum
 
 import torch
 import torch.nn as nn
@@ -44,9 +44,9 @@ class RelativeEmbedding(nn.Module):
         if position_embedding_type == PositionEmbeddingType.Learned:
             assert embedding_padding_mode != EmbeddingPaddingMode.Extend
             if heads_share_relative_embedding:
-                embedding_shape = (max_relative_position_past + max_relative_position_future, depth)
+                embedding_shape = (depth, max_relative_position_past + max_relative_position_future)
             else:
-                embedding_shape = (num_heads, max_relative_position_past + max_relative_position_future, depth)
+                embedding_shape = (num_heads, depth, max_relative_position_past + max_relative_position_future)
             self.embedding = nn.Parameter(torch.empty(embedding_shape))
             nn.init.normal_(self.embedding, mean=0, std=depth ** -0.5)
             self.last_past = max_relative_position_past
@@ -65,7 +65,6 @@ class RelativeEmbedding(nn.Module):
                 else:
                     self.weight = nn.Parameter(torch.eye(depth).unsqueeze(0).repeat(num_heads, 1, 1))
 
-
     def get_sinusoidal_embedding(self, past, future):
         if self.last_past is not None and past <= self.last_past and \
                 self.last_future is not None and future <= self.last_future:
@@ -75,10 +74,10 @@ class RelativeEmbedding(nn.Module):
             half_dim = self.depth // 2
             emb = math.log(10000) / (half_dim - 1)
             emb = torch.exp(torch.arange(half_dim, dtype=torch.float) * -emb)
-            emb = (torch.arange(num_embeddings, dtype=torch.float) - past + 1).unsqueeze(1) * emb.unsqueeze(0)
-            emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1).view(num_embeddings, -1)
+            emb = (torch.arange(num_embeddings, dtype=torch.float) - past + 1).unsqueeze(0) * emb.unsqueeze(1)
+            emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=0).view(-1, num_embeddings)
             if self.depth % 2 == 1:
-                emb = torch.cat([emb, torch.zeros(num_embeddings, 1)], dim=1)
+                emb = torch.cat([emb, torch.zeros(1, num_embeddings)], dim=0)
             emb = emb.to(self._float_tensor)
             self.last_past = past
             self.last_future = future
@@ -87,16 +86,16 @@ class RelativeEmbedding(nn.Module):
 
     @staticmethod
     def matmul_with_relative_keys(query, distance_embedding, heads_share_relative_embedding):
-        """Helper function for dot_product_unmasked_self_attention_relative_{2, 3}d.
+        """Helper function for dot_product_unmasked_self_attention_relative_nd.
         Args:
             query: [batch, heads, None or T, None or H, W, d]
-            distance_embedding: [None or heads, length, d]
+            distance_embedding: [None or heads, d, length]
         Returns:
             res: [batch, heads, None or T, None or H, W, length]
         """
         dim_str = 'xyz'[:query.ndim - 3]
         head_str = '' if heads_share_relative_embedding else 'h'
-        return torch.einsum(f'bh{dim_str}d,{head_str}md->bh{dim_str}m', query, distance_embedding)
+        return torch.einsum(f'bh{dim_str}d,{head_str}dm->bh{dim_str}m', query, distance_embedding)
 
     def get_distance_embedding(self, q_len, k_len):
         if self.key_start_position == KeyStartPosition.BeforeQuery:
@@ -107,36 +106,26 @@ class RelativeEmbedding(nn.Module):
             past = q_len
             future = k_len - 1
         if self.position_embedding_type == PositionEmbeddingType.Learned:
-            initial_embedding = self.embedding  # (Nh or None, max_past+max_future+1, depth)
+            initial_embedding = self.embedding  # (Nh or None, depth, max_past+max_future+1)
         elif self.embedding_padding_mode == EmbeddingPaddingMode.Extend:
             initial_embedding = self.get_sinusoidal_embedding(past, future)
         else:
             initial_embedding = self.embedding.to(self._float_tensor)
         initial_embedding = self.prune_embedding(past, future, initial_embedding)
         if self.position_embedding_type == PositionEmbeddingType.Hybrid:
-            if self.heads_share_relative_embedding:
-                initial_embedding = torch.einsum('td, de -> te', initial_embedding, self.weight)
-            else:
-                initial_embedding = torch.einsum('td, hde -> hte', initial_embedding, self.weight)
+            initial_embedding = torch.einsum('{h}ed, dt -> {h}et'.format(
+                h='' if self.heads_share_relative_embedding else 'h'), self.weight, initial_embedding)
         if self.embedding_padding_mode == EmbeddingPaddingMode.Extend:
             return initial_embedding
-        past_pad = max(past - self.last_past, 0)
-        future_pad = max(future - self.last_future, 0)
+        pad_shape = (max(past - self.last_past, 0), max(future - self.last_future, 0))
         if self.embedding_padding_mode == EmbeddingPaddingMode.Zero:
-            pad_shape = (0, 0, past_pad, future_pad)
-            if not self.heads_share_relative_embedding:
-                pad_shape = pad_shape + (0, 0)
             return F.pad(initial_embedding, pad_shape, 'constant')
-        # replicate padding does not work on 2d tensors, also it only supports padding in the last dimension
-        pad_shape = (past_pad, future_pad)
-        if self.heads_share_relative_embedding:
-            return F.pad(initial_embedding.transpose(1, 0).unsqueeze(0), pad_shape, 'replicate')[0].transpose(1, 0)
-        return F.pad(initial_embedding.transpose(1, 0), pad_shape, 'replicate').transpose(1, 0)
+        if self.heads_share_relative_embedding:  # replicate padding does not work on 2d tensors
+            return F.pad(initial_embedding.unsqueeze(0), pad_shape, 'replicate').squeeze(0)
+        return F.pad(initial_embedding, pad_shape, 'replicate')
 
     def prune_embedding(self, past_len, future_len, embedding):
-        # (Nh or None, max_past+max_future+1 or last_past+last_future+1, depth)
-        return embedding[...,
-               max(0, self.last_past - past_len):self.last_past + future_len, :]
+        return embedding[..., max(0, self.last_past - past_len):self.last_past + future_len]
 
     def forward(self, q_len, k_len=None, q=None):
         if k_len is None:
@@ -145,8 +134,3 @@ class RelativeEmbedding(nn.Module):
         if q is None:
             return distance_embedding
         return self.matmul_with_relative_keys(q, distance_embedding, self.heads_share_relative_embedding)
-
-
-if __name__ == '__main__':
-    a = RelativeEmbedding(4, 3, 5, 2, True, EmbeddingPaddingMode.Zero,
-                          PositionEmbeddingType.Learned, KeyStartPosition.WithQuery)
