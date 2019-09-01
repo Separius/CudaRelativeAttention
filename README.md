@@ -21,3 +21,13 @@ slow, compared to cublas.
 ## Embedding Class
 `DistanceEmbedding` class is an awesome wrapper for most of the common usages,
 check it out! :))
+
+## How to use
+```py
+net = RelativeAttention2d(num_heads, model_depth, [width, height],
+                          heads_share_relative_embeddings=True,
+                          embedding_padding_modes=EmbeddingPaddingMode.Extend,
+                          position_embedding_types=PositionEmbeddingType.Fixed,
+                          add_bias_to_query_for_relative_logits=True, # the D term in transformer-xl
+                          add_bias_to_query_for_key_logit=True) # the B term in transformer-xl
+```
