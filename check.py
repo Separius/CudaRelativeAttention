@@ -12,8 +12,14 @@ from relative_attention import RelativeAttention1d, RelativeAttention2d, Relativ
 tf_is_available = True
 try:
     from tf_code import TensorFlowTest
-except:
+except ImportError:
     tf_is_available = False
+
+profiler_is_available = True
+try:
+    from pytorch_memlab import profile
+except ImportError:
+    profiler_is_available = False
 
 
 def assert_equal(a, b):
@@ -297,18 +303,77 @@ def speed_check():
                                        f'f3:{forward_speedup_3d}, b3:{backward_speedup_3d}')
 
 
+def run_profiler():
+    for is_2d in (True, False):
+        for is_custom in (True, False):
+            model_depth = 64
+            B = 32 if is_2d else 16
+            num_heads = 8 if is_2d else 4
+            width = 32 if is_2d else 16
+            height = 32 if is_2d else 16
+            time_ = 8
+            shared_params = dict(heads_share_relative_embeddings=True,
+                                 embedding_padding_modes=EmbeddingPaddingMode.Extend,
+                                 position_embedding_types=PositionEmbeddingType.Hybrid,
+                                 add_bias_to_query_for_relative_logits=True, add_bias_to_query_for_key_logit=True,
+                                 use_custom_cuda_kernel=is_custom)
+            if is_2d:
+                net = RelativeAttention2d(num_heads, model_depth, [width, height], **shared_params).cuda()
+                q = torch.randn(B, num_heads, height, width, model_depth // num_heads).cuda()
+            else:
+                net = RelativeAttention3d(num_heads, model_depth, [width, height, time_], **shared_params).cuda()
+                q = torch.randn(B, num_heads, height, width, time_, model_depth // num_heads).cuda()
+            k = torch.randn_like(q).cuda()
+            m = (torch.randn(B * num_heads, height * width * (1 if is_2d else time_),
+                             height * width * (1 if is_2d else time_)) > 0).cuda()
+            func_list = [[run_3d_default, run_3d_custom], [run_2d_default, run_2d_custom]]
+            func_list[is_2d][is_custom](net, q, k, m)
+
+
+@profile
+def run_2d_custom(net, q, k, m):
+    net.use_custom_cuda_kernel = True
+    ans = net(q, k, m)
+    ans.mean().backward()
+
+
+@profile
+def run_2d_default(net, q, k, m):
+    net.use_custom_cuda_kernel = False
+    ans = net(q, k, m)
+    ans.mean().backward()
+
+
+@profile
+def run_3d_custom(net, q, k, m):
+    net.use_custom_cuda_kernel = True
+    ans = net(q, k, m)
+    ans.mean().backward()
+
+
+@profile
+def run_3d_default(net, q, k, m):
+    net.use_custom_cuda_kernel = False
+    ans = net(q, k, m)
+    ans.mean().backward()
+
+
 if __name__ == '__main__':
-    # correctness_check_1d_basic()
-    # correctness_check_2d()
-    # if tf_is_available:
-    #     correctness_check_tf()
-    # else:
-    #     print('skipping tf check')
-    # correctness_check_3d()
-    # config_check()
-    # grad_check()
+    correctness_check_1d_basic()
+    correctness_check_2d()
+    if tf_is_available:
+        correctness_check_tf()
+    else:
+        print('skipping tf check')
+    correctness_check_3d()
+    config_check()
+    grad_check()
     if torch.cuda.is_available():
         speed_check()
-        # speed_check_3d()
     else:
         print('skipping speed tests')
+    if torch.cuda.is_available():
+        if profiler_is_available:
+            run_profiler()
+        else:
+            print('skipping memory profile checks')
