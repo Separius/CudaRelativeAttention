@@ -30,7 +30,7 @@ class KeyStartPosition(Enum):
     WithQuery = 1
 
 
-class RelativeEmbedding(nn.Module):
+class DistanceEmbedding(nn.Module):
     def __init__(self, depth, max_relative_position_past, max_relative_position_future, num_heads,
                  heads_share_relative_embedding, embedding_padding_mode, position_embedding_type, key_start_position):
         super().__init__()
@@ -127,7 +127,7 @@ class RelativeEmbedding(nn.Module):
     def prune_embedding(self, past_len, future_len, embedding):
         return embedding[..., max(0, self.last_past - past_len):self.last_past + future_len]
 
-    def forward(self, q_len, k_len=None, q=None):
+    def forward(self, q_len, q=None, k_len=None):
         if k_len is None:
             k_len = q_len
         distance_embedding = self.get_distance_embedding(q_len, k_len)

@@ -27,10 +27,10 @@ std::vector<torch::Tensor> relative_positioning_backward_3d_cuda(
 torch::Tensor relative_positioning_forward_2d(
     torch::Tensor logits, torch::Tensor r_h, torch::Tensor r_w, torch::Tensor mask,
     const int h_q, const int w_q, const int h_k, const int w_k, const bool use_mask) {
-  CHECK_INPUT(logits); // logits is N(==B*Nh), H_q*W_q, H_k*W_k
-  CHECK_INPUT(r_h); // r_h is N(==B*Nh), H_q*W_q, H_k+H_q-1
-  CHECK_INPUT(r_w); // r_w is N(==B*Nh), H_q*W_q, W_k+W_q-1
-  CHECK_INPUT(mask); // mask is a bool tensor of N(==B*Nh), H_q*W_q, H_k*W_k or H_q*W_q, H_k*W_k OR 1, 1, 1
+  CHECK_CUDA(logits); // logits is N(==B*Nh), H_q*W_q, H_k*W_k
+  CHECK_CUDA(r_h); // r_h is N(==B*Nh), H_q*W_q, H_k+H_q-1
+  CHECK_CUDA(r_w); // r_w is N(==B*Nh), H_q*W_q, W_k+W_q-1
+  CHECK_CUDA(mask); // mask is a bool tensor of N(==B*Nh), H_q*W_q, H_k*W_k or H_q*W_q, H_k*W_k OR 1, 1, 1
   return relative_positioning_forward_2d_cuda(logits, r_h, r_w, mask, h_q, w_q, h_k, w_k, use_mask);
 }
 
@@ -45,11 +45,11 @@ std::vector<torch::Tensor> relative_positioning_backward_2d(
 torch::Tensor relative_positioning_forward_3d(
     torch::Tensor logits, torch::Tensor r_t, torch::Tensor r_h, torch::Tensor r_w, torch::Tensor mask,
     const int t_q, const int h_q, const int w_q, const int t_k, const int h_k, const int w_k, const bool use_mask) {
-  CHECK_INPUT(logits); // logits is B*Nh, Tq*Hq*Wq, Tq*Hk*Wk
-  CHECK_INPUT(r_t); // r_t is B*Nh, Tq*Hq*Wq, Tk+Tq-1
-  CHECK_INPUT(r_h); // r_h is B*Nh, Tq*Hq*Wq, Hk+Hq-1
-  CHECK_INPUT(r_w); // r_w is B*Nh, Tq*Hq*Wq, Wk+Wq-1
-  CHECK_INPUT(mask); // mask is a bool tensor of {B*Nh, Tq*Hq*Wq, Tk*Hk*Wk} or {Tq*Hq*Wq, Tk*Hk*Wk} or {1, 1, 1}
+  CHECK_CUDA(logits); // logits is B*Nh, Tq*Hq*Wq, Tq*Hk*Wk
+  CHECK_CUDA(r_t); // r_t is B*Nh, Tq*Hq*Wq, Tk+Tq-1
+  CHECK_CUDA(r_h); // r_h is B*Nh, Tq*Hq*Wq, Hk+Hq-1
+  CHECK_CUDA(r_w); // r_w is B*Nh, Tq*Hq*Wq, Wk+Wq-1
+  CHECK_CUDA(mask); // mask is a bool tensor of {B*Nh, Tq*Hq*Wq, Tk*Hk*Wk} or {Tq*Hq*Wq, Tk*Hk*Wk} or {1, 1, 1}
   return relative_positioning_forward_3d_cuda(logits, r_t, r_h, r_w, mask, t_q, h_q, w_q, t_k, h_k, w_k, use_mask);
 }
 
