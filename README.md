@@ -29,5 +29,11 @@ net = RelativeAttention2d(num_heads, model_depth, [width, height],
                           embedding_padding_modes=EmbeddingPaddingMode.Extend,
                           position_embedding_types=PositionEmbeddingType.Fixed,
                           add_bias_to_query_for_relative_logits=True, # the D term in transformer-xl
-                          add_bias_to_query_for_key_logit=True) # the B term in transformer-xl
+                          add_bias_to_query_for_key_logit=True, # the B term in transformer-xl
+                          # use my custom kernel or the vanilla pytorch implementation
+                          use_custom_cuda_kernel=True).cuda() 
+q = torch.randn(batch_size, num_heads, q_height, q_width, model_depth // num_heads).cuda()
+k = torch.randn_like(q)
+logits = net(q, k)
+print(logits.size()) # batch_size * num_heads, q_height * q_width, k_height * k_width
 ```
