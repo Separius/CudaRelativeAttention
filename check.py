@@ -22,6 +22,10 @@ except ImportError:
     profiler_is_available = False
 
 
+    def profile(func):
+        return func
+
+
 def assert_equal(a, b):
     assert np.allclose(a, b, atol=1.e-5), np.max(np.abs(a - b))
 
