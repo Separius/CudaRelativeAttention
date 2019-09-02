@@ -15,7 +15,7 @@ class RelativeAttention(nn.Module):
                  position_embedding_types=PositionEmbeddingType.Hybrid,
                  key_start_positions=KeyStartPosition.BeforeQuery,
                  add_bias_to_query_for_relative_logits=True,  # the d term in transformer-xl(second equation in page 5)
-                 add_bias_to_query_for_key_logit=True,  # the b term in transformer-xl(second equation in page 5)
+                 add_bias_to_query_for_key_logit=True,  # the c term in transformer-xl(second equation in page 5)
                  use_custom_cuda_kernel=True):
         super().__init__()
         assert model_depth % num_heads == 0
