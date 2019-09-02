@@ -18,6 +18,11 @@ torch::Tensor relative_positioning_forward_3d_cuda(
 std::vector<torch::Tensor> relative_positioning_backward_3d_cuda(
     torch::Tensor grad_out, const int t_q, const int h_q, const int w_q, const int t_k, const int h_k, const int w_k);
 
+torch::Tensor fuse_all_cuda(
+    torch::Tensor q, torch::Tensor k, torch::Tensor rh, torch::Tensor rw,
+    torch::Tensor uk, torch::Tensor uh, torch::Tensor uw, torch::Tensor m,
+    const int h_q, const int w_q, const int h_k, const int w_k, const int num_heads);
+
 // C++ interface
 
 #define CHECK_CUDA(x) AT_ASSERTM(x.type().is_cuda(), #x " must be a CUDA tensor")
@@ -61,10 +66,26 @@ std::vector<torch::Tensor> relative_positioning_backward_3d(
     return grads;
 }
 
+torch::Tensor fuse_all(
+    torch::Tensor q, torch::Tensor k, torch::Tensor rh, torch::Tensor rw,
+    torch::Tensor uk, torch::Tensor uh, torch::Tensor uw, torch::Tensor m,
+    const int h_q, const int w_q, const int h_k, const int w_k, const int num_heads){
+    CHECK_INPUT(q);
+    CHECK_INPUT(k);
+    CHECK_INPUT(rh);
+    CHECK_INPUT(rw);
+    CHECK_INPUT(uk);
+    CHECK_INPUT(uh);
+    CHECK_INPUT(uw);
+    CHECK_INPUT(m);
+    return fuse_all_cuda(q, k, rh, rw, uk, uh, uw, m, h_q, w_q, h_k, w_k, num_heads);
+}
+
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("forward_2d", &relative_positioning_forward_2d, "adds 2d relative positioning logits to the main logits (cuda, forward)");
   m.def("backward_2d", &relative_positioning_backward_2d, "adds 2d relative positioning logits to the main logits (cuda, backward)");
   m.def("forward_3d", &relative_positioning_forward_3d, "adds 3d relative positioning logits to the main logits (cuda, forward)");
   m.def("backward_3d", &relative_positioning_backward_3d, "adds 3d relative positioning logits to the main logits (cuda, backward)");
+  m.def("fuse_all_2d", &fuse_all, "calculates logits (cuda, forward)");
 }

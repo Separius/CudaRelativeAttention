@@ -19,6 +19,43 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
 namespace {
 
 template <typename scalar_t>
+__global__ void fuse_all_kernel(
+    torch::PackedTensorAccessor<scalar_t, 3, torch::RestrictPtrTraits, size_t> logits,
+    const torch::PackedTensorAccessor<scalar_t, 3, torch::RestrictPtrTraits, size_t> q,
+    const torch::PackedTensorAccessor<scalar_t, 3, torch::RestrictPtrTraits, size_t> k,
+    const torch::PackedTensorAccessor<scalar_t, 3, torch::RestrictPtrTraits, size_t> rh,
+    const torch::PackedTensorAccessor<scalar_t, 3, torch::RestrictPtrTraits, size_t> rw,
+    const torch::PackedTensorAccessor<scalar_t, 2, torch::RestrictPtrTraits, size_t> uk,
+    const torch::PackedTensorAccessor<scalar_t, 2, torch::RestrictPtrTraits, size_t> uh,
+    const torch::PackedTensorAccessor<scalar_t, 2, torch::RestrictPtrTraits, size_t> uw,
+    const torch::PackedTensorAccessor<bool, 3, torch::RestrictPtrTraits, size_t> m,
+    const int h_q, const int w_q, const int h_k, const int w_k, const int d, const int num_heads) {
+  const int kk = blockIdx.y; // B * N
+  const int i = blockIdx.x;  // Hq*Wq
+  const int j = threadIdx.x; // Hk*Wk
+  const int head_index = kk % num_heads;
+  const int r_h_index = j/w_k - i/w_q + h_q - 1;
+  const int r_w_index = j%w_k - i%w_q + w_q - 1;
+  extern __shared__ __align__(sizeof(scalar_t)) unsigned char _shared_memory_ptr[];
+  scalar_t* _shared_memory = reinterpret_cast<scalar_t *>(_shared_memory_ptr);
+  scalar_t* uk_shared = _shared_memory;
+  scalar_t* uh_shared = &_shared_memory[d];
+  scalar_t* uw_shared = &_shared_memory[2 * d];
+  if(j < d){
+    uk_shared[j] = uk[head_index][j];
+    uh_shared[j] = uh[head_index][j];
+    uw_shared[j] = uw[head_index][j];
+  }
+  __syncthreads();
+  scalar_t res = 0.0;
+  for(int dd = 0; dd < d; ++dd){
+    scalar_t q_d = q[kk][i][dd];
+    res += (q_d + uk_shared[dd]) * k[kk][j][dd] + (q_d + uh_shared[dd]) * rh[head_index][r_h_index][dd] + (q_d + uw_shared[dd]) * rw[head_index][r_w_index][dd];
+  }
+  logits[kk][i][j] = res + (m[kk][i][j] ? -10000.0 : 0.0);
+}
+
+template <typename scalar_t>
 __global__ void relative_positioning_forward_2d_kernel(
     const torch::PackedTensorAccessor<scalar_t, 3, torch::RestrictPtrTraits, size_t> r_h,
     const torch::PackedTensorAccessor<scalar_t, 3, torch::RestrictPtrTraits, size_t> r_w,
@@ -178,6 +215,33 @@ torch::Tensor relative_positioning_forward_2d_cuda(
   gpuErrchk(cudaPeekAtLastError());
   gpuErrchk(cudaDeviceSynchronize());
   return new_logits;
+}
+
+torch::Tensor fuse_all_cuda(
+    torch::Tensor q, torch::Tensor k, torch::Tensor rh, torch::Tensor rw,
+    torch::Tensor uk, torch::Tensor uh, torch::Tensor uw, torch::Tensor m,
+    const int h_q, const int w_q, const int h_k, const int w_k, const int num_heads) {
+    auto logits = torch::zeros({q.size(0), h_q * w_q, h_k * w_k},
+                                torch::dtype(q.dtype()).device(q.device()));
+    const dim3 blocks(h_q * w_q, q.size(0));
+    const dim3 threads(h_k * w_k);
+    const int d = q.size(2);
+    AT_DISPATCH_FLOATING_TYPES(logits.type(), "fuse_all_kernel", ([&] {
+        fuse_all_kernel<scalar_t><<<blocks, threads, 3*d*sizeof(scalar_t)>>>(
+        logits.packed_accessor<scalar_t, 3, torch::RestrictPtrTraits, size_t>(),
+        q.packed_accessor<scalar_t, 3, torch::RestrictPtrTraits, size_t>(),
+        k.packed_accessor<scalar_t, 3, torch::RestrictPtrTraits, size_t>(),
+        rh.packed_accessor<scalar_t, 3, torch::RestrictPtrTraits, size_t>(),
+        rw.packed_accessor<scalar_t, 3, torch::RestrictPtrTraits, size_t>(),
+        uk.packed_accessor<scalar_t, 2, torch::RestrictPtrTraits, size_t>(),
+        uh.packed_accessor<scalar_t, 2, torch::RestrictPtrTraits, size_t>(),
+        uw.packed_accessor<scalar_t, 2, torch::RestrictPtrTraits, size_t>(),
+        m.packed_accessor<bool, 3, torch::RestrictPtrTraits, size_t>(),
+        h_q, w_q, h_k, w_k, d, num_heads);
+    }));
+    gpuErrchk(cudaPeekAtLastError());
+    gpuErrchk(cudaDeviceSynchronize());
+    return logits;
 }
 
 std::vector<torch::Tensor> relative_positioning_backward_2d_cuda(

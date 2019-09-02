@@ -45,7 +45,10 @@ You can see how to profile it by checking the `speed_check()` and
 
 ## Further Improvements
 I also tried to fuse the logit calculation in my kernel, but it was way too
-slow, compared to cublas.
+slow, compared to cublas. You can check my experiment in `experiment.py`, even
+tough it's really slow for training, it has good performance in small inference
+mode. For example with batch_size=1, path_size=8x8, num_heads=1, and model_depth=16 
+you can get 6.5x performance gain!
 
 ## Embedding Class
 `DistanceEmbedding` class is an awesome wrapper for most of the common usages,
