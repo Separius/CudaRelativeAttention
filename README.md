@@ -26,6 +26,9 @@ logits = net(q, k, mask)
 print(logits.size()) # batch_size * num_heads, q_height * q_width, k_height * k_width
 ```
 
+## Algorithm
+![Efficient Relative Position Encoding](algorithm.png?raw=true "Efficient Relative Position Encoding")
+
 ## Reasoning
 I was trying to use a relative position encoding in my 2d attention network
 and there wasn't a good implementation for pytorch, so I decided to adopted the
@@ -38,7 +41,7 @@ on your settings before using it.
 
 ## How to profile
 You can see how to profile it by checking the `speed_check()` and
-`run_profiler()` function in `check.py`
+`run_profiler()` function in `check.py`. for example in my settings(large batch size with 32x32 patch images) I get **1.7x** speedup in my forward and backward calls.
 
 ## Further Improvements
 I also tried to fuse the logit calculation in my kernel, but it was way too
