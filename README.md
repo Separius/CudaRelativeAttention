@@ -49,9 +49,9 @@ slow, compared to cublas.
 check it out! :))
 
 ## References
-[Attention Augmented Convolutional Networks](https://arxiv.org/abs/1904.09925)
-[Music Transformer](https://arxiv.org/abs/1809.04281)
-[Transformer-XL: Attentive Language Models Beyond a Fixed-Length Context](https://arxiv.org/abs/1901.02860)
-[Tensor2Tensor](https://github.com/tensorflow/tensor2tensor/blob/master/tensor2tensor/layers/common_attention.py)
-[fairseq](https://github.com/pytorch/fairseq/blob/master/fairseq/modules/sinusoidal_positional_embedding.py)
+* [Attention Augmented Convolutional Networks](https://arxiv.org/abs/1904.09925)
+* [Music Transformer](https://arxiv.org/abs/1809.04281)
+* [Transformer-XL: Attentive Language Models Beyond a Fixed-Length Context](https://arxiv.org/abs/1901.02860)
+* [Tensor2Tensor](https://github.com/tensorflow/tensor2tensor/blob/master/tensor2tensor/layers/common_attention.py)
+* [fairseq](https://github.com/pytorch/fairseq/blob/master/fairseq/modules/sinusoidal_positional_embedding.py)
 
