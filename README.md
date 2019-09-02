@@ -33,7 +33,7 @@ print(logits.size()) # batch_size * num_heads, q_height * q_width, k_height * k_
 I was trying to use a relative position encoding in my 2d attention network
 and there wasn't a good implementation for pytorch, so I decided to adopted the
 tensor2tensor implementation into pytorch.
-Furthermore our architectures, uses this operation at each layer, so I decided
+Furthermore our architecture, uses this operation at each layer, so I decided
 to make it a bit more efficient by writing a custom **cuda** kernel. It's not
 a general purpose kernel and it might be slower than vanilla pytorch code, it
 depends on your GPU, your batch_size, query_size and query_dim, so profile it
@@ -56,7 +56,6 @@ check it out! :))
 
 ## References
 * [Attention Augmented Convolutional Networks](https://arxiv.org/abs/1904.09925)
-* [Music Transformer](https://arxiv.org/abs/1809.04281)
 * [Transformer-XL: Attentive Language Models Beyond a Fixed-Length Context](https://arxiv.org/abs/1901.02860)
 * [Tensor2Tensor](https://github.com/tensorflow/tensor2tensor/blob/master/tensor2tensor/layers/common_attention.py)
 * [fairseq](https://github.com/pytorch/fairseq/blob/master/fairseq/modules/sinusoidal_positional_embedding.py)
