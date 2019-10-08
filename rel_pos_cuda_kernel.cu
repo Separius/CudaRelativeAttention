@@ -117,9 +117,9 @@ __global__ void relative_positioning_forward_3d_kernel(
     if(j < (w_k + w_q - 1))
       r_w_shared[j] = r_w[k][i][j];
     __syncthreads();
-    new_logits[k][i][l] += r_t[k][i][r_t_index] + r_h_shared[r_h_index] + r_w_shared[r_w_index] + ((mask[mask_ndim == 2 ? 0 : k][i][l] && use_mask) ? -10000.0 : 0.0);
+    new_logits[k][i][l] += r_t[k][i][r_t_index] + r_h_shared[r_h_index] + r_w_shared[r_w_index] + ((use_mask && mask[mask_ndim == 2 ? 0 : k][i][l]) ? -10000.0 : 0.0);
   } else
-    new_logits[k][i][l] += r_t[k][i][r_t_index] + r_h[k][i][r_h_index] + r_w[k][i][r_w_index] + ((mask[mask_ndim == 2 ? 0 : k][i][l] && use_mask) ? -10000.0 : 0.0);
+    new_logits[k][i][l] += r_t[k][i][r_t_index] + r_h[k][i][r_h_index] + r_w[k][i][r_w_index] + ((use_mask && mask[mask_ndim == 2 ? 0 : k][i][l]) ? -10000.0 : 0.0);
 }
 
 template <typename scalar_t>
